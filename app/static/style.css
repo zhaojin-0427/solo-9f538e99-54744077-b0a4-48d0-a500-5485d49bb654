@@ -212,3 +212,11 @@ input:focus-visible, .btn:focus-visible, a:focus-visible {
   h1 { font-size: 1.25rem; }
   .meta { grid-template-columns: 1fr; }
 }
+
+.plain-list, .rule-list { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+.plain-list { list-style: disc; }
+.rule-list li, .plain-list li { margin: 0.2rem 0; font-size: 0.9rem; }
+.badge-within { background: var(--ok-soft); color: var(--ok); border-color: #b8dfc8; }
+.badge-over { background: var(--danger-soft); color: var(--danger); border-color: #f3c1bc; }
+.meta.summary { margin-top: 0.9rem; }
+form.upload .field:has(button) { align-self: end; }

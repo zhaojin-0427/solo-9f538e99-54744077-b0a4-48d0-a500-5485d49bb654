@@ -209,6 +209,75 @@ def _latest_version_for_date(
     ).fetchone()
 
 
+@dataclass
+class PublishedSnapshot:
+    """One published version together with its complete detail.
+
+    ``version`` and ``rows`` are read inside the same read transaction, so a
+    concurrent re-publish can never yield a mixture of two versions.
+    ``error`` is set when the version's stored detail is not complete.
+    """
+
+    version: sqlite3.Row | None
+    rows: list[sqlite3.Row]
+    error: str | None = None
+
+
+def load_published_snapshot(
+    conn: sqlite3.Connection, dataset_date: str
+) -> PublishedSnapshot:
+    """Read the date's published version and all of its observations atomically.
+
+    The read transaction fixes a single snapshot: either the whole detail of
+    the then-current published version is returned, or a clear error is.  No
+    partially mixed result is ever produced.
+    """
+    conn.execute("BEGIN")
+    try:
+        version = conn.execute(
+            """
+            SELECT * FROM versions
+             WHERE dataset_date = ? AND status = 'published'
+             ORDER BY version_no DESC
+             LIMIT 1
+            """,
+            (dataset_date,),
+        ).fetchone()
+        if version is None:
+            conn.execute("COMMIT")
+            return PublishedSnapshot(None, [])
+
+        rows = conn.execute(
+            """
+            SELECT row_no, site, metric, observed_at, observed_date,
+                   value, value_text
+              FROM observations
+             WHERE version_id = ?
+             ORDER BY site, metric, observed_at, row_no
+            """,
+            (version["id"],),
+        ).fetchall()
+        # Guard against a damaged store: never reconcile against partial detail.
+        if len(rows) != version["row_count"]:
+            conn.execute("COMMIT")
+            return PublishedSnapshot(
+                version,
+                [],
+                "已发布版本的明细不完整（应有 %d 条，实际 %d 条），"
+                "本次核查未生成结果。"
+                % (version["row_count"], len(rows)),
+            )
+        conn.execute("COMMIT")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+
+    return PublishedSnapshot(version, rows)
+
+
 def get_version(conn: sqlite3.Connection, version_id: int) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM versions WHERE id = ?", (version_id,)

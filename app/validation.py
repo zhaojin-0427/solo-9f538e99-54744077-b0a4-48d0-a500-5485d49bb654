@@ -43,14 +43,29 @@ HEADER_ALIASES: dict[str, set[str]] = {
     },
     "observed_at": {
         "observed_at", "observed at", "observed time", "datetime",
-        "timestamp", "time", "sample time",
-        "观测时刻", "观测时间", "监测时间", "采样时间", "时间",
+        "timestamp", "time", "sample time", "sampled at",
+        "观测时刻", "观测时间", "监测时间", "采样时间", "采样时刻", "时间",
     },
     "value": {
         "value", "result", "measurement", "concentration", "reading",
         "数值", "监测值", "测定值", "浓度", "值",
     },
 }
+
+# Retest files describe one laboratory re-measurement per row.  They use the
+# same four columns plus common "reference value" wording for the reading.
+RETEST_HEADER_ALIASES: dict[str, set[str]] = {
+    **HEADER_ALIASES,
+    "observed_at": HEADER_ALIASES["observed_at"]
+    | {"sample time", "sample_time", "sampled at", "sampled_at", "采样时刻"},
+    "value": HEADER_ALIASES["value"]
+    | {
+        "reference", "reference value", "reference_value", "retest value",
+        "参照值", "参考值", "复测值", "复测结果", "比对值",
+    },
+}
+
+RETEST_FIELD_LABELS = {**FIELD_LABELS, "observed_at": "采样时刻", "value": "参照值"}
 
 DATETIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
@@ -215,8 +230,22 @@ def _parse_value(raw: str, *, decimal_comma: bool = False) -> tuple[float, str]:
     return number, canonical
 
 
-def validate_file(path: str | Path, dataset_date: date) -> ValidationResult:
-    """Parse and validate *path* for publication on *dataset_date*."""
+def validate_file(
+    path: str | Path,
+    dataset_date: date,
+    *,
+    allow_duplicate_keys: bool = False,
+    header_aliases: dict[str, set[str]] | None = None,
+    field_labels: dict[str, str] | None = None,
+) -> ValidationResult:
+    """Parse and validate *path* for publication on *dataset_date*.
+
+    ``allow_duplicate_keys`` is used for retest files, where the same site,
+    metric and sampling time may legitimately appear more than once (several
+    readings are paired one-to-one against the published data).
+    """
+    aliases_map = header_aliases or HEADER_ALIASES
+    labels_map = field_labels or FIELD_LABELS
     result = ValidationResult()
     try:
         raw = Path(path).read_bytes()
@@ -258,12 +287,12 @@ def validate_file(path: str | Path, dataset_date: date) -> ValidationResult:
         normalised = _normalise_header(heading)
         if not normalised:
             continue
-        for field_name, aliases in HEADER_ALIASES.items():
+        for field_name, aliases in aliases_map.items():
             if normalised in aliases:
                 if field_name in field_columns:
                     result.add(
                         "duplicate_header",
-                        f"表头列“{heading.strip()}”与另一列重复映射到“{FIELD_LABELS[field_name]}”",
+                        f"表头列“{heading.strip()}”与另一列重复映射到“{labels_map[field_name]}”",
                         line=header_line,
                         field_name=field_name,
                     )
@@ -273,7 +302,7 @@ def validate_file(path: str | Path, dataset_date: date) -> ValidationResult:
 
     missing = [name for name in REQUIRED_FIELDS if name not in field_columns]
     if missing:
-        labels = "、".join(FIELD_LABELS[name] for name in missing)
+        labels = "、".join(labels_map[name] for name in missing)
         result.add(
             "missing_header",
             f"缺少必需列：{labels}",
@@ -354,7 +383,9 @@ def validate_file(path: str | Path, dataset_date: date) -> ValidationResult:
                 )
                 row_ok = False
 
-            if site and metric and observed_at:
+            if (
+                site and metric and observed_at and not allow_duplicate_keys
+            ):
                 key = (site, metric, observed_at)
                 first_line = seen_keys.get(key)
                 if first_line is not None:

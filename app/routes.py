@@ -21,9 +21,14 @@ from flask import (
     url_for,
 )
 
+from . import reconcile as reconciler
 from . import services, storage
 from .db import get_db
-from .validation import validate_file
+from .validation import (
+    RETEST_FIELD_LABELS,
+    RETEST_HEADER_ALIASES,
+    validate_file,
+)
 
 public_bp = Blueprint("public", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
@@ -303,4 +308,176 @@ def admin_download(version_id: int):
         as_attachment=True,
         download_name=version["original_filename"],
         conditional=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retest reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _retest_form_values() -> dict[str, str]:
+    return {
+        "dataset_date": (request.form.get("dataset_date") or "").strip(),
+        "max_time_diff": (request.form.get("max_time_diff") or "").strip(),
+        "max_abs_deviation": (request.form.get("max_abs_deviation") or "").strip(),
+    }
+
+
+@admin_bp.get("/reconcile")
+def reconcile_form():
+    conn = get_db()
+    published = services.list_published(conn)
+    saved = session.get("retest_form", {})
+    default_date = (
+        saved.get("dataset_date")
+        or current_app.config.get("ADMIN_DATASET_DATE")
+        or (published[0]["dataset_date"] if published else date.today().isoformat())
+    )
+    return render_template(
+        "admin/reconcile_form.html",
+        published=published,
+        form={
+            "dataset_date": default_date,
+            "max_time_diff": saved.get("max_time_diff") or "30",
+            "max_abs_deviation": saved.get("max_abs_deviation") or "0.5",
+        },
+        errors=[],
+    )
+
+
+@admin_bp.post("/reconcile")
+def reconcile_run():
+    _check_csrf()
+    form = _retest_form_values()
+    session["retest_form"] = form
+
+    def render_error(errors: list[str], status: int = 400):
+        conn = get_db()
+        return (
+            render_template(
+                "admin/reconcile_form.html",
+                published=services.list_published(conn),
+                form={
+                    "dataset_date": form["dataset_date"],
+                    "max_time_diff": form["max_time_diff"],
+                    "max_abs_deviation": form["max_abs_deviation"],
+                },
+                errors=errors,
+            ),
+            status,
+        )
+
+    dataset_date = _parse_dataset_date(form["dataset_date"])
+    if dataset_date is None:
+        return render_error(["请选择有效的核查日期。"])
+
+    upload_file = request.files.get("file")
+    if upload_file is None or not upload_file.filename:
+        return render_error(["请选择要上传的复测 CSV 文件。"])
+
+    original_name = Path(upload_file.filename).name
+    original_name = "".join(
+        ch for ch in original_name if ch.isprintable() and ch not in "\\/"
+    )[:200] or "retest.csv"
+    if not original_name.lower().endswith((".csv", ".txt")):
+        return render_error(["仅支持 CSV 文件。"])
+
+    try:
+        window_minutes, window_micros = reconciler.parse_time_window_minutes(
+            form["max_time_diff"]
+        )
+        max_deviation = reconciler.parse_deviation(form["max_abs_deviation"])
+    except reconciler.ParameterError as exc:
+        return render_error([str(exc)])
+
+    files_dir = current_app.config["FILES_DIR"]
+    temp_path = storage.new_temp_path(files_dir)
+    try:
+        upload_file.save(temp_path)
+    except OSError:
+        storage.discard_temp(temp_path)
+        return render_error(["复测文件保存失败，请重试。"], status=500)
+
+    try:
+        result = validate_file(
+            temp_path,
+            dataset_date,
+            allow_duplicate_keys=True,
+            header_aliases=RETEST_HEADER_ALIASES,
+            field_labels=RETEST_FIELD_LABELS,
+        )
+    finally:
+        storage.discard_temp(temp_path)
+
+    if not result.ok:
+        return (
+            render_template(
+                "admin/retest_result.html",
+                dataset_date=dataset_date.isoformat(),
+                filename=original_name,
+                result=result,
+                report=None,
+                error="文件未通过校验，未生成核查结果。",
+            ),
+            422,
+        )
+
+    conn = get_db()
+    snapshot = services.load_published_snapshot(conn, dataset_date.isoformat())
+    if snapshot.version is None:
+        return (
+            render_template(
+                "admin/retest_result.html",
+                dataset_date=dataset_date.isoformat(),
+                filename=original_name,
+                result=result,
+                report=None,
+                error=f"日期 {dataset_date.isoformat()} 没有已发布的版本，"
+                "无法核对；本次未生成结果。",
+            ),
+            409,
+        )
+    if snapshot.error:
+        return (
+            render_template(
+                "admin/retest_result.html",
+                dataset_date=dataset_date.isoformat(),
+                filename=original_name,
+                result=result,
+                report=None,
+                error=snapshot.error,
+            ),
+            409,
+        )
+
+    retest_readings = reconciler.retest_readings_from_observations(
+        result.observations
+    )
+    published_readings = reconciler.published_readings_from_rows(snapshot.rows)
+    try:
+        report = reconciler.reconcile(
+            retest_readings,
+            published_readings,
+            window_micros=window_micros,
+            max_abs_deviation=max_deviation,
+            max_time_diff_minutes=window_minutes,
+        )
+    except reconciler.ParameterError as exc:
+        return render_error([str(exc)], status=422)
+
+    # A re-publish during the request is harmless: ``snapshot`` was read in
+    # one transaction.  Tell the reviewer if it has since been superseded.
+    current = services.get_current_published(conn, dataset_date.isoformat())
+    republished = current is not None and current["id"] != snapshot.version["id"]
+
+    return render_template(
+        "admin/retest_result.html",
+        dataset_date=dataset_date.isoformat(),
+        filename=original_name,
+        result=result,
+        report=report,
+        version=snapshot.version,
+        error=None,
+        republished=republished,
     )

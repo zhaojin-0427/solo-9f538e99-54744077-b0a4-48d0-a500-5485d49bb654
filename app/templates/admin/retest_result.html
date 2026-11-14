@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}复测核查结果 · 河流水质数据中心{% endblock %}
+{% block content %}
+<h1>复测核查结果</h1>
+<p class="lede">
+  复测文件 <span class="mono">{{ filename }}</span> · 核查日期 <strong>{{ dataset_date }}</strong>
+</p>
+
+{% if not report %}
+  <div class="notice error">{{ error }}</div>
+  <div class="actions">
+    <a class="btn" href="{{ url_for('admin.reconcile_form') }}">返回重新核查</a>
+  </div>
+  {% if result and result.issues %}
+  <div class="card" style="margin-top:1rem">
+    <h2>文件问题</h2>
+    <p class="small muted">
+      文件未通过校验，因此没有生成任何核查结果{% if result.rows_seen %}（已检查 {{ result.rows_seen }} 个数据行）{% endif %}。共发现 {{ result.issue_count }} 个问题，请修正后重新上传。
+    </p>
+    <ul class="issues">
+      {% for issue in result.issues %}
+        <li>
+          {% if issue.line %}<span class="loc">第 {{ issue.line }} 行</span>{% endif %}
+          {{ issue.message }}
+        </li>
+      {% endfor %}
+    </ul>
+    {% if result.truncated %}
+      <p class="small muted">为保证页面可读，仅显示前 {{ result.issues | length }} 个问题；总计 {{ result.issue_count }} 个。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+{% else %}
+
+<div class="card">
+  <dl class="meta">
+    <dt>所用发布版本</dt>
+    <dd>
+      <span class="badge badge-version">v{{ version.version_no }}</span>
+      <span class="badge badge-published">已发布</span>
+      <span class="small muted">发布于 {{ version.published_at | datetime_local }}</span>
+    </dd>
+    <dt>版本日期</dt><dd>{{ version.dataset_date }}</dd>
+    <dt>版本明细条数</dt><dd>{{ version.row_count }} 条</dd>
+    <dt>版本原始文件</dt><dd class="mono">{{ version.original_filename }}</dd>
+    <dt>文件 SHA-256</dt><dd class="mono">{{ version.sha256 }}</dd>
+    <dt>最大时间差</dt><dd>{{ report.max_time_diff_minutes | string }} 分钟</dd>
+    <dt>最大绝对数值偏差</dt><dd>{{ report.max_abs_deviation | string }}</dd>
+  </dl>
+  <div class="notice">
+    本次核查的全部配对与未配对项均取自 <strong>v{{ version.version_no }}</strong> 的完整明细（同一版本、同一读取快照），未混入其他版本数据。
+  </div>
+  {% if republished %}
+    <div class="notice warn">
+      核查期间该日期已重新发布新版本，但本页结果仍完整取自 v{{ version.version_no }}；如需核对最新版本，请重新执行核查。
+    </div>
+  {% endif %}
+  <dl class="meta summary">
+    <dt>配对成功</dt><dd><strong>{{ report.pair_count }}</strong> 对（总时间差 {{ report.total_time_diff_text }} 分钟）</dd>
+    <dt>偏差超限</dt><dd><strong>{{ report.over_limit | length }}</strong> 对</dd>
+    <dt>复测读数</dt><dd>{{ report.retest_total }} 条，未配对 {{ report.retest_unmatched | length }} 条</dd>
+    <dt>已发布读数</dt><dd>{{ report.published_total }} 条，未配对 {{ report.published_unmatched | length }} 条</dd>
+  </dl>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>配对结果</h2>
+    <span class="muted small">共 {{ report.pair_count }} 对</span>
+  </div>
+  {% if report.pairs %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>站点</th>
+          <th>指标</th>
+          <th>复测采样时刻</th>
+          <th class="num">参照值</th>
+          <th>已发布观测时刻</th>
+          <th class="num">已发布值</th>
+          <th class="num">时间差</th>
+          <th class="num">绝对偏差</th>
+          <th>偏差</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pair in report.pairs %}
+        <tr>
+          <td class="num muted">{{ loop.index }}</td>
+          <td>{{ pair.retest.site }}</td>
+          <td>{{ pair.retest.metric }}</td>
+          <td class="mono">{{ pair.retest.observed_at }}<br><span class="muted small">第 {{ pair.retest.row_no }} 行</span></td>
+          <td class="num mono">{{ pair.retest.value_text }}</td>
+          <td class="mono">{{ pair.published.observed_at }}<br><span class="muted small">已发布第 {{ pair.published.row_no }} 行</span></td>
+          <td class="num mono">{{ pair.published.value_text }}</td>
+          <td class="num mono">{{ pair.time_diff_text }}</td>
+          <td class="num mono">{{ pair.deviation_text }}</td>
+          <td>
+            {% if pair.exceeds_deviation %}
+              <span class="badge badge-over">超限</span>
+            {% else %}
+              <span class="badge badge-within">在限</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="empty">没有满足配对条件的读数。</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>绝对偏差超限项</h2>
+    <span class="muted small">共 {{ report.over_limit | length }} 对</span>
+  </div>
+  {% if report.over_limit %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>站点</th>
+          <th>指标</th>
+          <th>复测采样时刻</th>
+          <th class="num">参照值</th>
+          <th>已发布观测时刻</th>
+          <th class="num">已发布值</th>
+          <th class="num">时间差</th>
+          <th class="num">绝对偏差</th>
+          <th class="num">超出阈值</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pair in report.over_limit %}
+        <tr>
+          <td class="num muted">{{ loop.index }}</td>
+          <td>{{ pair.retest.site }}</td>
+          <td>{{ pair.retest.metric }}</td>
+          <td class="mono">{{ pair.retest.observed_at }} <span class="muted small">第 {{ pair.retest.row_no }} 行</span></td>
+          <td class="num mono">{{ pair.retest.value_text }}</td>
+          <td class="mono">{{ pair.published.observed_at }} <span class="muted small">已发布第 {{ pair.published.row_no }} 行</span></td>
+          <td class="num mono">{{ pair.published.value_text }}</td>
+          <td class="num mono">{{ pair.time_diff_text }}</td>
+          <td class="num mono">{{ pair.deviation_text }}</td>
+          <td class="num mono">{{ pair.excess_text }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="empty">所有已配对项均在偏差阈值内。</div>
+  {% endif %}
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-head">
+      <h2>复测侧未配对</h2>
+      <span class="muted small">共 {{ report.retest_unmatched | length }} 条</span>
+    </div>
+    {% if report.retest_unmatched %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>站点</th><th>指标</th><th>采样时刻</th><th class="num">参照值</th><th>原因</th></tr>
+        </thead>
+        <tbody>
+          {% for reading, reason in report.retest_unmatched %}
+          <tr>
+            <td>{{ reading.site }}</td>
+            <td>{{ reading.metric }}</td>
+            <td class="mono">{{ reading.observed_at }}<br><span class="muted small">第 {{ reading.row_no }} 行</span></td>
+            <td class="num mono">{{ reading.value_text }}</td>
+            <td class="small muted">{{ reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="empty">所有复测读数均已配对。</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>已发布侧未配对</h2>
+      <span class="muted small">共 {{ report.published_unmatched | length }} 条</span>
+    </div>
+    {% if report.published_unmatched %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>站点</th><th>指标</th><th>观测时刻</th><th class="num">数值</th><th>原因</th></tr>
+        </thead>
+        <tbody>
+          {% for reading, reason in report.published_unmatched %}
+          <tr>
+            <td>{{ reading.site }}</td>
+            <td>{{ reading.metric }}</td>
+            <td class="mono">{{ reading.observed_at }}<br><span class="muted small">已发布第 {{ reading.row_no }} 行</span></td>
+            <td class="num mono">{{ reading.value_text }}</td>
+            <td class="small muted">{{ reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="empty">该版本所有读数均已配对。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="actions">
+  <a class="btn" href="{{ url_for('admin.reconcile_form') }}">重新核查</a>
+  <a class="btn secondary" href="{{ url_for('public.version_detail', version_id=version.id) }}">查看所用发布版本</a>
+</div>
+{% endif %}
+{% endblock %}
